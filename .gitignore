@@ -1,0 +1,5 @@
+sync-subtree
+*.o
+*.a
+*.lib
+*.exe
