@@ -102,6 +102,11 @@ private void syncSubtree(Options options) {
 	enforce(workspaceRoot.length, "jj root returned an empty path");
 
 	string currentCommit = queryRevision(workspaceRoot, "@");
+	bool isEmptyWorkingChange = !queryJJ(workspaceRoot, [
+		"log", "-r", currentCommit, "--no-graph", "-T", "description",
+	]).length && !queryJJ(workspaceRoot, [
+		"diff", "-r", currentCommit, "--summary",
+	]).strip.length;
 	string lastSync = findLastSync(workspaceRoot, options.subtree);
 	string target = buildPath(workspaceRoot, options.subtree.replace("/", dirSeparator));
 	bool targetExists = pathExists(target);
@@ -166,7 +171,12 @@ private void syncSubtree(Options options) {
 		options.subtree, upstreamCommit[0 .. 8]);
 
 	string patchChange;
-	if (lastSync.length && !isResumingSync) {
+	bool hasLocalPatches = lastSync.length && !isResumingSync &&
+		queryJJ(workspaceRoot, [
+			"diff", "--from", lastSync, "--to", currentCommit, "--summary",
+			"--", rootFileset(options.subtree),
+		]).strip.length != 0;
+	if (hasLocalPatches) {
 		string marker = "sync-subtree temporary patch " ~ randomUUID().to!string;
 		runJJ(workspaceRoot, ["new", "--no-edit", "-m", marker, lastSync]);
 		patchChange = findRevisionByTitle(workspaceRoot,
@@ -177,7 +187,7 @@ private void syncSubtree(Options options) {
 		]);
 	}
 
-	if (isResumingSync)
+	if (isResumingSync || isEmptyWorkingChange)
 		runJJ(workspaceRoot, ["describe", "-r", "@", "-m", syncTitle]);
 	else
 		runJJ(workspaceRoot, ["new", "-m", syncTitle, currentCommit]);
@@ -217,18 +227,33 @@ private void syncSubtree(Options options) {
 	string patchTitle = "Apply local patches to '" ~ options.subtree ~ "'";
 	if (patchChange.length) {
 		runJJ(workspaceRoot, ["rebase", "-s", patchChange, "-d", syncCommit]);
-		runJJ(workspaceRoot, ["describe", "-r", patchChange, "-m", patchTitle]);
-		runJJ(workspaceRoot, ["new", patchChange]);
+		hasLocalPatches = queryJJ(workspaceRoot, [
+			"diff", "-r", patchChange, "--summary",
+		]).strip.length != 0;
+		if (hasLocalPatches) {
+			runJJ(workspaceRoot, ["describe", "-r", patchChange, "-m", patchTitle]);
+			runJJ(workspaceRoot, ["new", patchChange]);
+		}
+		else {
+			runJJ(workspaceRoot, ["describe", "-r", patchChange, "-m", ""]);
+			runJJ(workspaceRoot, ["edit", patchChange]);
+		}
 	}
 	else {
 		runJJ(workspaceRoot, ["new", syncCommit]);
 	}
 
 	writeln(syncTitle);
-	if (patchChange.length) {
-		string conflicts = queryJJ(workspaceRoot, [
-			"resolve", "--list", "-r", patchChange, "--", rootFileset(options.subtree),
+	if (hasLocalPatches) {
+		string conflicts;
+		string conflictedRevision = queryJJ(workspaceRoot, [
+			"log", "-r", patchChange ~ " & conflicts()", "--no-graph",
+			"-T", "commit_id",
 		]).strip.idup;
+		if (conflictedRevision.length)
+			conflicts = queryJJ(workspaceRoot, [
+				"resolve", "--list", "-r", patchChange,
+			]).strip.idup;
 		if (conflicts.length)
 			writeln("Local patches applied with conflicts:\n", conflicts);
 		else
